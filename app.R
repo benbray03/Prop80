@@ -205,8 +205,7 @@ ui <- fluidPage(
           
           div(class = "col-sm-4",
               div(class = "app-header",
-                  div(class = "app-title", "Ocean Conditions Explorer"),
-                  div(class = "app-sub",   "California Current · Heat Wave Analysis")
+                  div(class = "app-title", "Ocean Conditions Explorer")
               ),
               div(class = "controls-section",
                   span(class = "ctrl-label", "Time Frame"),
