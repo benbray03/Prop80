@@ -1,334 +1,224 @@
 library(shiny)
 library(leaflet)
 library(dplyr)
+library(tidyr)
+library(RColorBrewer)
 
-df <- read.csv("data/test_preds_shiny.csv", stringsAsFactors = FALSE)
+# ── Load data ──────────────────────────────────────────────────────────────────
+dat <- readRDS("data/CPFV_PA_sp_decade_roms_n_ensemble_shiny.rds")
 
-pred_vars <- c("log_d_mean_gb", "oxygen_mean_0_50", "oxygen_surface",
-               "salt_surface",  "temp_mean_0_50")
+# Parse lon/lat from cell_coord_id  (format: "lon-lat", e.g. "-120.5-34.2")
+# Handles negative longitudes: split on the LAST dash that is preceded by a digit
+dat <- dat %>%
+  mutate(
+    lat = as.numeric(sub("-.*", "", cell_coord_id)),        # everything before the first dash
+    lon = -as.numeric(sub(".*-", "", cell_coord_id))        # everything after the last dash, negated
+  )
 
-var_labels <- c(
-  log_d_mean_gb    = "Log Groundfish Biomass",
-  oxygen_mean_0_50 = "Mean Oxygen 0–50m",
-  oxygen_surface   = "Surface Oxygen",
-  salt_surface     = "Surface Salinity",
-  temp_mean_0_50   = "Mean Temp 0–50m"
+keys <- dat %>%
+  distinct(species, decade) %>%
+  arrange(species, decade) %>%
+  mutate(key = paste(species, decade, sep = "||")) %>%
+  pull(key)
+
+dat_split <- dat %>%
+  arrange(species, decade) %>%
+  group_by(species, decade) %>%
+  group_split() %>%
+  setNames(keys)
+
+species_list <- sort(unique(dat$species))
+decade_list  <- sort(unique(dat$decade))
+
+# ── Colour palette (shared, rescaled per species+decade subset) ────────────────
+pal_fun <- colorNumeric(
+  palette = rev(brewer.pal(11, "RdYlBu")),
+  domain  = c(0, 1),   # pa values are probabilities 0-1
+  na.color = "transparent"
 )
 
-var_units <- c(
-  log_d_mean_gb    = "log units",
-  oxygen_mean_0_50 = "µmol/kg",
-  oxygen_surface   = "µmol/kg",
-  salt_surface     = "PSU",
-  temp_mean_0_50   = "°C"
-)
-
+# ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
   tags$head(
-    tags$link(rel = "stylesheet",
-              href = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&display=swap"),
     tags$style(HTML("
-
-      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-      body {
-        font-family: 'IBM Plex Sans', sans-serif;
-        background: #f0f4f8;
-        color: #2d3f50;
-        height: 100vh;
-        overflow: hidden;
-      }
-
-      .container-fluid { padding: 0 !important; height: 100vh; }
-      .row { height: 100vh; margin: 0 !important; display: flex; }
-
-      /* ── sidebar ── */
-      .col-sm-4 {
-        width: 280px !important;
-        flex: 0 0 280px !important;
-        max-width: 280px !important;
-        background: #ffffff;
-        border-right: 1px solid #d6e4ef;
-        display: flex;
-        flex-direction: column;
-        padding: 0 !important;
-        height: 100vh;
-        overflow-y: auto;
-      }
-
-      /* ── main panel ── */
-      .col-sm-8 {
-        flex: 1 1 auto !important;
-        width: auto !important;
-        max-width: none !important;
-        padding: 0 !important;
-        height: 100vh;
-      }
-
-      /* ── header ── */
-      .app-header {
-        padding: 20px 20px 16px;
-        background: #2a7f62;
-        color: white;
-      }
-      .app-title {
-        font-size: 15px;
-        font-weight: 600;
-        letter-spacing: 0.2px;
-        color: #ffffff;
-      }
-      .app-sub {
-        font-size: 11px;
-        color: rgba(255,255,255,0.65);
-        margin-top: 3px;
-        font-weight: 300;
-      }
-
-      /* ── controls ── */
-      .controls-section {
-        padding: 18px 20px;
-        border-bottom: 1px solid #e8f0f7;
-      }
-
-      .ctrl-label {
-        font-size: 10px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-        color: #7a9bb5;
-        margin-bottom: 6px;
-        display: block;
-      }
-
-      .form-group { margin-bottom: 14px !important; }
-      .form-group:last-child { margin-bottom: 0 !important; }
-      .form-group label { display: none; }
-
-      select.form-control {
-        background: #f5f8fb !important;
-        border: 1px solid #c8dce9 !important;
-        border-radius: 6px !important;
-        color: #2d3f50 !important;
-        font-family: 'IBM Plex Sans', sans-serif !important;
-        font-size: 13px !important;
-        padding: 8px 32px 8px 11px !important;
-        height: auto !important;
-        cursor: pointer;
-        transition: border-color 0.15s, box-shadow 0.15s;
-        appearance: none;
-        background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7'%3E%3Cpath d='M1 1l4.5 4.5L10 1' stroke='%237a9bb5' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") !important;
-        background-repeat: no-repeat !important;
-        background-position: right 11px center !important;
-      }
-      select.form-control:focus {
-        border-color: #2a7f62 !important;
-        box-shadow: 0 0 0 3px rgba(42,127,98,0.1) !important;
-        outline: none !important;
-        background-color: #ffffff !important;
-      }
-
-      /* ── stats ── */
-      .stats-section {
-        padding: 18px 20px;
-        flex: 1;
-      }
-      .stats-title {
-        font-size: 10px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-        color: #7a9bb5;
-        margin-bottom: 12px;
-      }
-      .stats-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-      .stat-card {
-        background: #f5f8fb;
-        border: 1px solid #dce9f3;
-        border-radius: 7px;
-        padding: 10px 12px;
-      }
-      .stat-card.full-width { grid-column: 1 / -1; }
-      .stat-card-label {
-        font-size: 10px;
-        color: #7a9bb5;
-        font-weight: 500;
-        margin-bottom: 3px;
-      }
-      .stat-card-value {
-        font-size: 15px;
-        font-weight: 600;
-        color: #2d3f50;
-      }
-      .stat-card-unit {
-        font-size: 10px;
-        color: #9fb8cc;
-        margin-top: 1px;
-      }
-
-      /* ── badge ── */
-      .hw-badge {
-        display: inline-block;
-        font-size: 10px;
-        font-weight: 600;
-        padding: 3px 10px;
-        border-radius: 20px;
-        margin-bottom: 14px;
-        letter-spacing: 0.3px;
-      }
-      .hw-pre  { background: #ddeef9; color: #2a6496; border: 1px solid #b8d8ef; }
-      .hw-post { background: #fce8e6; color: #b94038; border: 1px solid #f5c5c2; }
-
-      /* ── map ── */
-      #map { width: 100% !important; height: 100vh !important; }
-
-      /* ── leaflet legend ── */
-      .leaflet-control.legend {
-        background: rgba(255,255,255,0.95) !important;
-        border: 1px solid #d6e4ef !important;
-        border-radius: 8px !important;
-        color: #2d3f50 !important;
-        font-family: 'IBM Plex Sans', sans-serif !important;
-        font-size: 12px !important;
-        padding: 10px 14px !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important;
-      }
-
+      body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+             background: #f4f6f9; margin: 0; }
+      .app-header { background: #1a3a5c; color: white; padding: 14px 24px;
+                    display: flex; align-items: center; gap: 16px; }
+      .app-header h2 { margin: 0; font-size: 1.25rem; font-weight: 600; }
+      .app-header .subtitle { font-size: 0.85rem; opacity: 0.75; }
+      .sidebar-panel { background: white; border-radius: 8px;
+                       box-shadow: 0 1px 4px rgba(0,0,0,.12);
+                       padding: 18px; margin: 16px 8px 16px 16px; }
+      .map-panel    { margin: 16px 16px 16px 8px; border-radius: 8px;
+                      overflow: hidden;
+                      box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+      .species-btn  { display: block; width: 100%; text-align: left;
+                      padding: 8px 12px; margin-bottom: 6px; border: none;
+                      border-radius: 6px; cursor: pointer;
+                      background: #eef2f7; color: #1a3a5c;
+                      font-size: 0.88rem; font-weight: 500;
+                      transition: background .15s, color .15s; }
+      .species-btn:hover  { background: #c8d8ec; }
+      .species-btn.active { background: #1a3a5c; color: white; }
+      .decade-row   { display: flex; flex-wrap: wrap; gap: 8px;
+                      margin-top: 12px; }
+      .decade-btn   { flex: 1 1 calc(50% - 4px); padding: 7px 4px;
+                      border: 2px solid #c0cfe0; border-radius: 6px;
+                      background: white; color: #1a3a5c; font-size: 0.82rem;
+                      font-weight: 600; cursor: pointer; text-align: center;
+                      transition: all .15s; }
+      .decade-btn:hover  { background: #eef2f7; }
+      .decade-btn.active { background: #1a3a5c; color: white;
+                           border-color: #1a3a5c; }
+      .section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: .06em;
+                       text-transform: uppercase; color: #7a90a8;
+                       margin: 16px 0 8px; }
+      .stat-box { background: #eef2f7; border-radius: 6px; padding: 10px 14px;
+                  margin-top: 14px; font-size: 0.82rem; color: #1a3a5c; }
+      .stat-box b { font-size: 1rem; }
     "))
   ),
   
-  div(class = "container-fluid",
-      div(class = "row",
-          
-          div(class = "col-sm-4",
-              div(class = "app-header",
-                  div(class = "app-title", "Ocean Conditions Explorer")
-              ),
-              div(class = "controls-section",
-                  span(class = "ctrl-label", "Time Frame"),
-                  selectInput("timeframe", label = NULL,
-                              choices = c("Pre Heat Wave" = "PreHW",
-                                          "Post Heat Wave" = "PostHW")),
-                  span(class = "ctrl-label", "Variable"),
-                  selectInput("variable", label = NULL,
-                              choices  = setNames(pred_vars, var_labels[pred_vars]),
-                              selected = "log_d_mean_gb")
-              ),
-              div(class = "stats-section",
-                  div(class = "stats-title", "Summary Statistics"),
-                  uiOutput("stats_cards")
-              )
-          ),
-          
-          div(class = "col-sm-8",
-              leafletOutput("map", height = "100vh")
-          )
+  # Header
+  div(class = "app-header",
+      tags$img(src = "https://cdn-icons-png.flaticon.com/512/2942/2942909.png",
+               height = "36px"),
+      div(
+        h2("CPFV Species Distribution — Decadal Presence / Absence"),
+        div(class = "subtitle", "ROMS ensemble model · ensemble mean PA by decade")
       )
-  )
+  ),
+  
+  fluidRow(
+    # ── Sidebar ──
+    column(3,
+           div(class = "sidebar-panel",
+               div(class = "section-label", "Species"),
+               uiOutput("species_buttons"),
+               div(class = "section-label", "Decade"),
+               uiOutput("decade_buttons"),
+               div(class = "stat-box",
+                   uiOutput("stats_out")
+               )
+           )
+    ),
+    # ── Map ──
+    column(9,
+           div(class = "map-panel",
+               leafletOutput("map", height = "82vh")
+           )
+    )
+  ),
+  
+  # JS to handle button clicks → update hidden inputs
+  tags$script(HTML("
+    $(document).on('click', '.species-btn', function() {
+      $('.species-btn').removeClass('active');
+      $(this).addClass('active');
+      Shiny.setInputValue('selected_species', $(this).data('val'), {priority: 'event'});
+    });
+    $(document).on('click', '.decade-btn', function() {
+      $('.decade-btn').removeClass('active');
+      $(this).addClass('active');
+      Shiny.setInputValue('selected_decade', $(this).data('val'), {priority: 'event'});
+    });
+  "))
 )
 
+# ── Server ────────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
   
-  filtered <- reactive({
-    df %>% filter(time_frame == input$timeframe)
+  rv <- reactiveValues(
+    species = species_list[1],
+    decade  = decade_list[1]
+  )
+  
+  observeEvent(input$selected_species, { rv$species <- input$selected_species })
+  observeEvent(input$selected_decade,  { rv$decade  <- input$selected_decade  })
+  
+  # Species buttons
+  output$species_buttons <- renderUI({
+    lapply(species_list, function(sp) {
+      cls <- if (sp == rv$species) "species-btn active" else "species-btn"
+      tags$button(class = cls, `data-val` = sp, sp)
+    })
   })
   
-  pal <- reactive({
-    colorNumeric("viridis", domain = df[[input$variable]])
+  # Decade buttons
+  output$decade_buttons <- renderUI({
+    div(class = "decade-row",
+        lapply(decade_list, function(dec) {
+          cls <- if (dec == rv$decade) "decade-btn active" else "decade-btn"
+          tags$button(class = cls, `data-val` = dec, dec)
+        })
+    )
   })
   
+  # Filtered subset
+  subset_dat <- reactive({
+    key <- paste(rv$species, rv$decade, sep = "||")
+    dat_split[[key]]
+  })
+  
+  # Stats
+  output$stats_out <- renderUI({
+    d <- subset_dat()
+    if (nrow(d) == 0) return(p("No data for this selection."))
+    HTML(sprintf(
+      "<b>%s</b><br>Decade: %s<br><br>
+       Cells: <b>%d</b><br>
+       Mean PA: <b>%.3f</b><br>
+       Range: <b>%.3f – %.3f</b>",
+      rv$species, rv$decade,
+      nrow(d),
+      mean(d$pa_decade_mean_pa, na.rm = TRUE),
+      min(d$pa_decade_mean_pa,  na.rm = TRUE),
+      max(d$pa_decade_mean_pa,  na.rm = TRUE)
+    ))
+  })
+  
+  # Base map
   output$map <- renderLeaflet({
     leaflet() %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
-      setView(lng = -121, lat = 37.5, zoom = 6)
+      setView(lng = -122, lat = 36, zoom = 6) %>%
+      addLegend(
+        position = "bottomright",
+        pal      = pal_fun,
+        values   = seq(0, 1, by = 0.1),
+        title    = "Mean PA",
+        opacity  = 0.85
+      )
   })
   
+  # Update circles when selection changes
   observe({
-    d   <- filtered()
-    var <- input$variable
-    cp  <- pal()
-    lbl <- var_labels[var]
-    un  <- var_units[var]
-    
-    popup_html <- paste0(
-      "<div style='font-family:IBM Plex Sans,sans-serif;min-width:150px;padding:2px'>",
-      "<div style='font-size:11px;font-weight:600;color:#7a9bb5;text-transform:uppercase;",
-      "letter-spacing:0.5px;margin-bottom:4px'>", lbl, "</div>",
-      "<div style='font-size:20px;font-weight:600;color:#2d3f50;line-height:1.1'>",
-      round(d[[var]], 3), "</div>",
-      "<div style='font-size:11px;color:#9fb8cc;margin-bottom:8px'>", un, "</div>",
-      "<div style='font-size:11px;color:#aaa;border-top:1px solid #eef2f6;padding-top:6px'>",
-      round(d$lat, 3), "°N · ", round(d$lon, 3), "°E</div>",
-      "</div>"
-    )
+    d <- subset_dat()
     
     leafletProxy("map") %>%
-      clearShapes() %>%
-      removeControl("legend") %>%
-      addCircles(
+      clearGroup("pa_points")
+    
+    if (nrow(d) == 0) return()
+    
+    leafletProxy("map") %>%
+      addCircleMarkers(
         data        = d,
         lng         = ~lon,
         lat         = ~lat,
-        radius      = 3000,
-        fillColor   = ~cp(d[[var]]),
-        color       = ~cp(d[[var]]),
+        group       = "pa_points",
+        radius      = 5,
+        color       = NA,
+        fillColor   = ~pal_fun(pa_decade_mean_pa),
         fillOpacity = 0.85,
-        weight      = 0,
-        popup       = popup_html
-      ) %>%
-      addLegend(
-        position = "bottomright",
-        pal      = cp,
-        values   = d[[var]],
-        title    = paste0(lbl, "<br><span style='font-weight:300;font-size:10px'>", un, "</span>"),
-        layerId  = "legend",
-        opacity  = 0.9
+        popup       = ~paste0(
+          "<b>", species, "</b><br>",
+          "Decade: ", decade, "<br>",
+          "Cell: ", cell_coord_id, "<br>",
+          "PA: <b>", round(pa_decade_mean_pa, 3), "</b><br>",
+          "Model: ", roms_model
+        )
       )
-  })
-  
-  output$stats_cards <- renderUI({
-    d    <- filtered()
-    var  <- input$variable
-    un   <- var_units[var]
-    vals <- d[[var]]
-    
-    badge_class <- if (input$timeframe == "PreHW") "hw-badge hw-pre" else "hw-badge hw-post"
-    badge_label <- if (input$timeframe == "PreHW") "Pre Heat Wave" else "Post Heat Wave"
-    
-    tagList(
-      div(class = badge_class, badge_label),
-      div(class = "stats-grid",
-          div(class = "stat-card",
-              div(class = "stat-card-label", "Mean"),
-              div(class = "stat-card-value", round(mean(vals, na.rm=TRUE), 3)),
-              div(class = "stat-card-unit",  un)
-          ),
-          div(class = "stat-card",
-              div(class = "stat-card-label", "Median"),
-              div(class = "stat-card-value", round(median(vals, na.rm=TRUE), 3)),
-              div(class = "stat-card-unit",  un)
-          ),
-          div(class = "stat-card",
-              div(class = "stat-card-label", "Std Dev"),
-              div(class = "stat-card-value", round(sd(vals, na.rm=TRUE), 3)),
-              div(class = "stat-card-unit",  un)
-          ),
-          div(class = "stat-card",
-              div(class = "stat-card-label", "n cells"),
-              div(class = "stat-card-value", format(nrow(d), big.mark=",")),
-              div(class = "stat-card-unit",  "observations")
-          ),
-          div(class = "stat-card full-width",
-              div(class = "stat-card-label", "Range"),
-              div(class = "stat-card-value",
-                  paste0(round(min(vals, na.rm=TRUE), 2), " – ", round(max(vals, na.rm=TRUE), 2))),
-              div(class = "stat-card-unit",  un)
-          )
-      )
-    )
   })
 }
 
