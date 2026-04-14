@@ -3,11 +3,26 @@ library(leaflet)
 library(dplyr)
 library(tidyr)
 library(RColorBrewer)
+library(ggplot2)
+library(plotly)
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 dat <- readRDS("data/CPFV_PA_sp_decade_roms_n_ensemble_shiny.rds")
 
-# Parse lon/lat from cell_coord_id (format: "lat-lon", e.g. "33-117.3")
+# -- Raw Data for Time series
+dat_raw <- dat
+
+dat_raw_by_species <- dat_raw %>%
+  group_by(species) %>%
+  group_split() %>%
+  setNames(sort(unique(dat_raw$species)))
+
+dat_ens_by_species <- dat %>%
+  group_by(species) %>%
+  group_split() %>%
+  setNames(sort(unique(dat$species)))
+
+# format: "lat-lon", e.g. "33-117.3"
 dat <- dat %>%
   mutate(
     lat = as.numeric(sub("-.*", "", cell_coord_id)),
@@ -17,6 +32,11 @@ dat <- dat %>%
     species = as.character(species),
     decade  = as.character(decade)
   )
+
+dat <- dat %>%
+  group_by(cell_coord_id, decade, species, lat, lon) %>%
+  summarise(pa_decade_mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE),
+            .groups = "drop")
 
 # ── Species name lookup (code → common name) ──────────────────────────────────
 species_labels <- c(
@@ -84,8 +104,8 @@ ui <- fluidPage(
   
   # Header (no icon)
   div(class = "app-header",
-      h2("CPFV Species Distribution — Decadal Presence / Absence"),
-      div(class = "subtitle", "ROMS ensemble model · ensemble mean PA by decade")
+      h2("Species Distribution — Decadal Density"),
+      div(class = "subtitle", "ROMS ensemble model · ensemble mean Density by decade")
   ),
   
   fluidRow(
@@ -100,7 +120,9 @@ ui <- fluidPage(
                            selected = decade_list[1]),
                div(class = "stat-box",
                    uiOutput("stats_out")
-               )
+               ),
+               div(class = "section-label", "Decadal Mean Density"),
+               plotlyOutput("ts_plot", height = "280px")
            )
     ),
     # ── Map ──
@@ -157,7 +179,7 @@ server <- function(input, output, session) {
     HTML(sprintf(
       "<b>%s</b><br>Decade: %s<br><br>
        Cells: <b>%d</b><br>
-       Mean PA: <b>%.3f</b><br>
+       Mean Density: <b>%.3f</b><br>
        Range: <b>%.3f \u2013 %.3f</b>",
       label, rv$decade,
       nrow(d),
@@ -179,6 +201,47 @@ server <- function(input, output, session) {
         title    = "Mean PA",
         opacity  = 0.85
       )
+  })
+  
+  #time series plot
+  output$ts_plot <- renderPlotly({
+    
+    # Ensemble bars — all decades for selected species
+    ens <- dat_ens_by_species[[rv$species]] %>%
+      group_by(decade) %>%
+      summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop")
+    
+    # Model points — mean per model per decade
+    mod <- dat_raw_by_species[[rv$species]] %>%
+      group_by(decade, roms_model) %>%
+      summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop")
+    
+    p <- ggplot() +
+      geom_col(data = ens, aes(x = decade, y = mean_pa),
+               fill = "#1a3a5c", alpha = 0.7, width = 0.6) +
+      geom_point(data = mod, aes(x = decade, y = mean_pa, color = roms_model),
+                 size = 2.5, position = position_dodge(width = 0.4)) +
+      scale_color_manual(values = c("gfdl" = "#e05c2a",
+                                    "hadl" = "#2a9d8f",
+                                    "ipsl" = "#e9c46a"),
+                         name = "Model") +
+      scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+      labs(x = NULL, y = "Mean Density") +
+      theme_minimal(base_size = 11) +
+      theme(
+        axis.text.x  = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y  = element_text(size = 8),
+        legend.position  = "bottom",
+        legend.text      = element_text(size = 7),
+        legend.title     = element_text(size = 8),
+        panel.grid.major.x = element_blank(),
+        plot.background  = element_rect(fill = "transparent", color = NA),
+        panel.background = element_rect(fill = "transparent", color = NA)
+      )
+    
+    ggplotly(p, tooltip = c("y", "colour")) %>%
+      layout(legend = list(orientation = "h", y = -0.25)) %>%
+      config(displayModeBar = FALSE)
   })
   
   # Update circles when selection changes
@@ -204,8 +267,7 @@ server <- function(input, output, session) {
           "<b>", label, "</b><br>",
           "Decade: ", decade, "<br>",
           "Cell: ", cell_coord_id, "<br>",
-          "PA: <b>", round(pa_decade_mean_pa, 3), "</b><br>",
-          "Model: ", roms_model
+          "Density: <b>", round(pa_decade_mean_pa, 3), "</b><br>"
         )
       )
   })
