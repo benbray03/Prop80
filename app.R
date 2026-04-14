@@ -5,6 +5,7 @@ library(tidyr)
 library(RColorBrewer)
 library(ggplot2)
 library(plotly)
+library(jsonlite)
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 dat <- readRDS("data/CPFV_PA_sp_decade_roms_n_ensemble_shiny.rds")
@@ -60,6 +61,8 @@ dat_split <- dat %>%
 species_list <- sort(unique(dat$species))
 decade_list  <- sort(unique(dat$decade))
 
+decade_labels <- setNames(seq_along(decade_list), decade_list)
+
 # ── Colour palette ─────────────────────────────────────────────────────────────
 pal_fun <- colorNumeric(
   palette  = rev(brewer.pal(11, "RdYlBu")),
@@ -95,6 +98,22 @@ ui <- fluidPage(
       .stat-box { background: #eef2f7; border-radius: 6px; padding: 10px 14px;
                   margin-top: 14px; font-size: 0.82rem; color: #1a3a5c; }
       .stat-box b { font-size: 1rem; }
+      .irs-handle { 
+        background: none !important; 
+        border: none !important;
+        box-shadow: none !important;
+        top: 4px !important;
+      }
+      .irs-handle::after {
+        content: '🐟';
+        font-size: 1.4rem;
+        position: absolute;
+        top: -4px;
+        left: -6px;
+      }
+      .irs-bar { background: #4a8abf !important; border-color: #4a8abf !important; }
+      .irs-line { background: #c0cfe0 !important; }
+      .irs-single { background: #1a3a5c !important; }
       #decade_select { width: 100%; border-radius: 6px;
                        border: 2px solid #c0cfe0; padding: 7px 10px;
                        color: #1a3a5c; font-size: 0.88rem; font-weight: 600;
@@ -104,8 +123,18 @@ ui <- fluidPage(
   
   # Header (no icon)
   div(class = "app-header",
-      h2("Species Distribution — Decadal Density"),
-      div(class = "subtitle", "ROMS ensemble model · ensemble mean Density by decade")
+      h2("Species Distribution — Mean Decadal Environmental Suitability"),
+      div(class = "subtitle", "ROMS ensemble model · ensemble Mean Decadal Environmental Suitability"),
+      div(style = "margin-top: 10px;",
+          sliderInput("decade_select", label = NULL,
+                      min   = 1,
+                      max   = length(decade_list),
+                      value = 1,
+                      step  = 1,
+                      width = "100%",
+                      ticks = TRUE,
+                      animate = FALSE)
+      )
   ),
   
   fluidRow(
@@ -114,14 +143,10 @@ ui <- fluidPage(
            div(class = "sidebar-panel",
                div(class = "section-label", "Species"),
                uiOutput("species_buttons"),
-               div(class = "section-label", "Decade"),
-               selectInput("decade_select", label = NULL,
-                           choices  = decade_list,
-                           selected = decade_list[1]),
                div(class = "stat-box",
                    uiOutput("stats_out")
                ),
-               div(class = "section-label", "Decadal Mean Density"),
+               div(class = "section-label", "Mean Decadal Environmental Suitability"),
                plotlyOutput("ts_plot", height = "280px")
            )
     ),
@@ -140,6 +165,13 @@ ui <- fluidPage(
       $(this).addClass('active');
       Shiny.setInputValue('selected_species', $(this).data('val'), {priority: 'event'});
     });
+  ")),
+  tags$script(HTML("
+    $(document).on('input change', '#decade_select', function() {
+      var idx = $(this).val() - 1;
+      var decades = ", jsonlite::toJSON(decade_list), ";
+      $('.irs-single').text(decades[idx]);
+    });
   "))
 )
 
@@ -152,7 +184,7 @@ server <- function(input, output, session) {
   )
   
   observeEvent(input$selected_species, { rv$species <- input$selected_species })
-  observeEvent(input$decade_select,    { rv$decade  <- input$decade_select    })
+  observeEvent(input$decade_select, { rv$decade <- decade_list[input$decade_select] })
   
   # Species buttons (show proper names, store codes as data-val)
   output$species_buttons <- renderUI({
@@ -179,7 +211,7 @@ server <- function(input, output, session) {
     HTML(sprintf(
       "<b>%s</b><br>Decade: %s<br><br>
        Cells: <b>%d</b><br>
-       Mean Density: <b>%.3f</b><br>
+       Mean Decadal Environmental Suitability: <b>%.3f</b><br>
        Range: <b>%.3f \u2013 %.3f</b>",
       label, rv$decade,
       nrow(d),
@@ -198,35 +230,39 @@ server <- function(input, output, session) {
         position = "bottomright",
         pal      = pal_fun,
         values   = seq(0, 1, by = 0.1),
-        title    = "Mean PA",
-        opacity  = 0.85
+        title    = "Mean Decadal<br>Environmental<br>Suitability",
+        opacity  = 0.85,
+        labFormat = labelFormat(transform = function(x) sort(x, decreasing = TRUE))
       )
   })
   
   #time series plot
   output$ts_plot <- renderPlotly({
     
+    decade_levels <- sort(unique(dat$decade))
+    
     # Ensemble bars — all decades for selected species
     ens <- dat_ens_by_species[[rv$species]] %>%
       group_by(decade) %>%
-      summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop")
+      summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop") %>%
+      mutate(decade = factor(decade, levels = decade_levels))
     
-    # Model points — mean per model per decade
     mod <- dat_raw_by_species[[rv$species]] %>%
       group_by(decade, roms_model) %>%
-      summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop")
+      summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop") %>%
+      mutate(decade = factor(decade, levels = decade_levels))
     
     p <- ggplot() +
-      geom_col(data = ens, aes(x = decade, y = mean_pa),
-               fill = "#1a3a5c", alpha = 0.7, width = 0.6) +
       geom_point(data = mod, aes(x = decade, y = mean_pa, color = roms_model),
                  size = 2.5, position = position_dodge(width = 0.4)) +
-      scale_color_manual(values = c("gfdl" = "#e05c2a",
-                                    "hadl" = "#2a9d8f",
-                                    "ipsl" = "#e9c46a"),
+      scale_color_manual(values = c("gfdl"     = "#2a9d8f",
+                                    "hadl"     = "#e05c2a",
+                                    "ipsl"     = "#e9c46a",
+                                    "ensemble" = "#1a3a5c",
+                                    "histnew"  = "#7a90a8"),
                          name = "Model") +
       scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
-      labs(x = NULL, y = "Mean Density") +
+      labs(x = NULL, y = "Mean Decadal Environmental Suitability") +
       theme_minimal(base_size = 11) +
       theme(
         axis.text.x  = element_text(angle = 45, hjust = 1, size = 8),
@@ -267,7 +303,7 @@ server <- function(input, output, session) {
           "<b>", label, "</b><br>",
           "Decade: ", decade, "<br>",
           "Cell: ", cell_coord_id, "<br>",
-          "Density: <b>", round(pa_decade_mean_pa, 3), "</b><br>"
+          "Mean Decadal Environmental Suitability: <b>", round(pa_decade_mean_pa, 3), "</b><br>"
         )
       )
   })
