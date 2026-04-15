@@ -8,6 +8,7 @@ library(plotly)
 library(jsonlite)
 
 # ── Load data ──────────────────────────────────────────────────────────────────
+raster_list <- readRDS("data/raster_list.rds")
 dat <- readRDS("data/CPFV_PA_sp_decade_roms_n_ensemble_shiny.rds")
 
 # -- Raw Data for Time series
@@ -98,19 +99,6 @@ ui <- fluidPage(
       .stat-box { background: #eef2f7; border-radius: 6px; padding: 10px 14px;
                   margin-top: 14px; font-size: 0.82rem; color: #1a3a5c; }
       .stat-box b { font-size: 1rem; }
-      .irs-handle { 
-        background: none !important; 
-        border: none !important;
-        box-shadow: none !important;
-        top: 4px !important;
-      }
-      .irs-handle::after {
-        content: '🐟';
-        font-size: 1.4rem;
-        position: absolute;
-        top: -4px;
-        left: -6px;
-      }
       .irs-bar { background: #4a8abf !important; border-color: #4a8abf !important; }
       .irs-line { background: #c0cfe0 !important; }
       .irs-single { background: #1a3a5c !important; }
@@ -132,7 +120,7 @@ ui <- fluidPage(
                       value = 1,
                       step  = 1,
                       width = "100%",
-                      ticks = TRUE,
+                      ticks = FALSE,   # hide the numeric tick marks
                       animate = FALSE)
       )
   ),
@@ -147,7 +135,8 @@ ui <- fluidPage(
                    uiOutput("stats_out")
                ),
                div(class = "section-label", "Mean Decadal Environmental Suitability"),
-               plotlyOutput("ts_plot", height = "280px")
+               plotlyOutput("ts_plot", height = "220px"),
+               uiOutput("ts_legend")
            )
     ),
     # ── Map ──
@@ -167,11 +156,18 @@ ui <- fluidPage(
     });
   ")),
   tags$script(HTML("
-    $(document).on('input change', '#decade_select', function() {
-      var idx = $(this).val() - 1;
-      var decades = ", jsonlite::toJSON(decade_list), ";
-      $('.irs-single').text(decades[idx]);
-    });
+  function updateDecadeSlider() {
+    var idx = $('#decade_select').val() - 1;
+    var decades = ", jsonlite::toJSON(decade_list), ";
+    // Update the bubble above the handle
+    $('.irs-single').text(decades[idx]);
+    // Replace the min/max labels with first/last decade
+    $('.irs-min').text(decades[0]);
+    $('.irs-max').text(decades[decades.length - 1]);
+  }
+  $(document).on('input change', '#decade_select', updateDecadeSlider);
+  // Also run on load after a short delay for Shiny to render
+  $(document).ready(function() { setTimeout(updateDecadeSlider, 300); });
   "))
 )
 
@@ -210,7 +206,6 @@ server <- function(input, output, session) {
     if (is.null(label) || is.na(label)) label <- rv$species
     HTML(sprintf(
       "<b>%s</b><br>Decade: %s<br><br>
-       Cells: <b>%d</b><br>
        Mean Decadal Environmental Suitability: <b>%.3f</b><br>
        Range: <b>%.3f \u2013 %.3f</b>",
       label, rv$decade,
@@ -236,12 +231,22 @@ server <- function(input, output, session) {
       )
   })
   
+  observe({
+    leafletProxy("map") %>% clearGroup("pa_layer")
+    
+    key <- paste0(rv$species, "_", rv$decade)
+    r   <- raster_list[[key]]
+    if (is.null(r)) return()
+    
+    leafletProxy("map") %>%
+      addRasterImage(r, colors = pal_fun, opacity = 0.85, group = "pa_layer")
+  })
+  
   #time series plot
   output$ts_plot <- renderPlotly({
     
     decade_levels <- sort(unique(dat$decade))
     
-    # Ensemble bars — all decades for selected species
     ens <- dat_ens_by_species[[rv$species]] %>%
       group_by(decade) %>%
       summarise(mean_pa = mean(pa_decade_mean_pa, na.rm = TRUE), .groups = "drop") %>%
@@ -254,7 +259,7 @@ server <- function(input, output, session) {
     
     p <- ggplot() +
       geom_point(data = mod, aes(x = decade, y = mean_pa, color = roms_model),
-                 size = 2.5, position = position_dodge(width = 0.4)) +
+                 size = 2.5, position = position_dodge(width = 0.4), show.legend = FALSE) +
       scale_color_manual(values = c("gfdl"     = "#2a9d8f",
                                     "hadl"     = "#e05c2a",
                                     "ipsl"     = "#e9c46a",
@@ -262,51 +267,50 @@ server <- function(input, output, session) {
                                     "histnew"  = "#7a90a8"),
                          name = "Model") +
       scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
-      labs(x = NULL, y = "Mean Decadal Environmental Suitability") +
+      labs(x = NULL, y = "Mean Decadal Environmental<br>Suitability") +
       theme_minimal(base_size = 11) +
       theme(
-        axis.text.x  = element_text(angle = 45, hjust = 1, size = 8),
-        axis.text.y  = element_text(size = 8),
-        legend.position  = "bottom",
-        legend.text      = element_text(size = 7),
-        legend.title     = element_text(size = 8),
+        axis.text.x        = element_text(angle = 45, hjust = 1, size = 8),
+        axis.ticks.x       = element_blank(),
+        axis.text.y        = element_text(size = 8),
+        legend.position    = "none",
         panel.grid.major.x = element_blank(),
-        plot.background  = element_rect(fill = "transparent", color = NA),
-        panel.background = element_rect(fill = "transparent", color = NA)
+        plot.background    = element_rect(fill = "transparent", color = NA),
+        panel.background   = element_rect(fill = "transparent", color = NA)
       )
     
     ggplotly(p, tooltip = c("y", "colour")) %>%
-      layout(legend = list(orientation = "h", y = -0.25)) %>%
+      layout(showlegend = FALSE) %>%
       config(displayModeBar = FALSE)
-  })
+    
+  })  # <-- closes renderPlotly
   
-  # Update circles when selection changes
-  observe({
-    d <- subset_dat()
-    leafletProxy("map") %>% clearGroup("pa_points")
-    if (is.null(d) || nrow(d) == 0) return()
+  output$ts_legend <- renderUI({
+    model_colors <- c(
+      "gfdl"     = "#2a9d8f",
+      "ipsl"     = "#e9c46a",
+      "hadl"     = "#e05c2a",
+      "ensemble" = "#1a3a5c",
+      "histnew"  = "#7a90a8"
+    )
     
-    label <- species_labels[[rv$species]]
-    if (is.null(label) || is.na(label)) label <- rv$species
-    
-    leafletProxy("map") %>%
-      addCircleMarkers(
-        data        = d,
-        lng         = ~lon,
-        lat         = ~lat,
-        group       = "pa_points",
-        radius      = 5,
-        color       = NA,
-        fillColor   = ~pal_fun(pa_decade_mean_pa),
-        fillOpacity = 0.85,
-        popup       = ~paste0(
-          "<b>", label, "</b><br>",
-          "Decade: ", decade, "<br>",
-          "Cell: ", cell_coord_id, "<br>",
-          "Mean Decadal Environmental Suitability: <b>", round(pa_decade_mean_pa, 3), "</b><br>"
-        )
+    items <- lapply(names(model_colors), function(m) {
+      tags$div(style = "display: inline-flex; align-items: center; margin-right: 10px;",
+               tags$span(style = paste0(
+                 "display:inline-block; width:10px; height:10px; border-radius:50%;",
+                 "background:", model_colors[[m]], "; margin-right:4px;"
+               )),
+               tags$span(style = "font-size:0.75rem; color:#1a3a5c;", m)
       )
-  })
+    })
+    
+    tags$div(
+      style = "display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0;",
+      tags$span(style = "font-size:0.75rem; font-weight:700; color:#7a90a8;
+                         margin-right:6px; align-self:center;", "MODEL"),
+      items
+    )
+})
 }
 
 shinyApp(ui, server)
